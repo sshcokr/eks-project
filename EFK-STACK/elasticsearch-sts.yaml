@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: efk-stack
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: shin-es
+  namespace: efk-stack
+spec:
+  serviceName: elasticsearch
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      terminationGracePeriodSeconds: 300
+      initContainers:
+      # Elasticsearch가 사용하는 볼륨에 대한 권한설정 부분.
+      - name: fix-the-volume-permission
+        image: busybox
+        command:
+        - sh
+        - -c
+        - chown -R 1000:1000 /usr/share/elasticsearch/data
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: data
+          mountPath: /usr/share/elasticsearch/data
+      # 가상 메모리에 관한 설정. 
+      # default 값은 '262144' 이다.
+      - name: increase-the-vm-max-map-count
+        image: busybox
+        command:
+        - sysctl
+        - -w
+        - vm.max_map_count=262144
+        securityContext:
+          privileged: true
+      # File Descripto에 관한 설정
+      - name: increase-the-ulimit
+        image: busybox
+        command:
+        - sh
+        - -c
+        - ulimit -n 65536
+        securityContext:
+          privileged: true
+      containers:
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.10.1
+        ports:
+        - containerPort: 9200
+          name: rest 
+          protocol: TCP
+        - containerPort: 9300
+          name: inter-node
+          protocol: TCP
+        # 사용자의 인프라 리소스에 맞게 설정한다.
+        resources:
+          requests:
+            cpu: 100m
+          limits:
+            cpu: 1000m
+        env:
+          # 사용자가 설정하고 싶은 클러스터 이름을 설정한다.
+          - name: cluster.name
+            value: k8s-logs
+          - name: node.name
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: network.host
+            value: "0.0.0.0"
+          # Elasticsearch의 노드끼리 통신하기 위한 Discovery 설정
+          - name: discovery.seed_hosts
+            value: "shin-es-0.elasticsearch,shin-es-1.elasticsearch,shin-es-2.elasticsearch"
+          # 명시된 노드들을 대상으로 마스터 노드를 선출한다.
+          - name: cluster.initial_master_nodes
+            value: "shin-es-0,shin-es-1,shin-es-2"
+          # 메모리의 Heap 사이즈 설정
+          - name: ES_JAVA_OPTS
+            value: "-Xms512m -Xmx512m"
+        volumeMounts:
+        - name: data
+          mountPath: /usr/share/elasticsearch/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+      labels:
+        app: elasticsearch
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: gp2
+      # Elasticsearch가 보관가능한 최대 스토리지의 용량크기 설정.
+      resources:
+        requests:
+          storage: 20Gi
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: elasticsearch
+  namespace: efk-stack
+  labels:
+    app: elasticsearch
+spec:
+  type: ClusterIP
+  selector:
+    app: elasticsearch
+  ports:
+    - name: rest
+      port: 9200
+    - name: inter-node
+      port: 9300
